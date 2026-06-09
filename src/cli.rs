@@ -255,6 +255,14 @@ pub enum Commands {
     /// Useful for verifying correct firmware is loaded and device capabilities.
     Info,
 
+    /// Read all I2C registers from presence detector firmware
+    ///
+    /// Dumps status, configuration, and measurement registers exposed by
+    /// `i2c_presence_detector.bin` as JSON (default) or human-readable text.
+    /// Requires presence firmware (application ID 2). Result registers are most
+    /// meaningful while the detector is running (e.g. with xm125-radar-monitor.service).
+    Registers,
+
     /// Perform distance measurement
     ///
     /// Measures distance to objects with high precision. Automatically configures

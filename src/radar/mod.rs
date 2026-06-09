@@ -6,6 +6,7 @@
 pub mod debug;
 pub mod distance;
 pub mod presence;
+pub mod presence_registers;
 pub mod registers;
 
 use crate::error::{RadarError, Result};
@@ -18,6 +19,7 @@ use std::time::Instant;
 // Re-export public types
 pub use distance::DistanceMeasurement;
 pub use presence::{PresenceMeasurement, PresenceRange};
+pub use presence_registers::{PresenceRegisterSnapshot, read_presence_registers};
 pub use registers::*;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -450,6 +452,14 @@ impl XM125Radar {
     pub fn debug_registers(&mut self, mode: &str) -> Result<()> {
         let mut debugger = debug::RegisterDebugger::new(&mut self.i2c);
         debugger.debug_all_registers(mode)
+    }
+
+    /// Read all I2C registers from presence detector firmware (`i2c_presence_detector.bin`).
+    pub fn read_presence_registers(&mut self) -> Result<PresenceRegisterSnapshot> {
+        if !self.is_connected {
+            self.connect()?;
+        }
+        read_presence_registers(&mut self.i2c)
     }
 
     /// Configure distance range from string (e.g., "0.1:3.0")

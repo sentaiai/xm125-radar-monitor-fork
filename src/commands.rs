@@ -168,6 +168,40 @@ async fn handle_presence_command(
     Ok(())
 }
 
+/// Handle registers command — full presence I2C register snapshot
+fn handle_registers_command(
+    radar: &mut XM125Radar,
+    format: &OutputFormat,
+) -> Result<(), RadarError> {
+    let snapshot = radar.read_presence_registers()?;
+
+    if snapshot.application_id != crate::radar::PRESENCE_APP_ID {
+        return Err(RadarError::DeviceError {
+            message: format!(
+                "Expected presence firmware (application_id=2), got {}",
+                snapshot.application_id
+            ),
+        });
+    }
+
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        }
+        OutputFormat::Human => {
+            println!("📋 XM125 Presence Register Snapshot");
+            println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        }
+        OutputFormat::Csv => {
+            return Err(RadarError::DeviceError {
+                message: "CSV format not supported for registers command; use --format json"
+                    .to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Execute the main command logic
 pub async fn execute_command(
     cli: &Cli,
@@ -183,6 +217,10 @@ pub async fn execute_command(
         Commands::Info => {
             let info = radar.get_info()?;
             handle_info_command(&info, &cli.output.format)?;
+        }
+
+        Commands::Registers => {
+            handle_registers_command(radar, &cli.output.format)?;
         }
 
         Commands::Distance {
