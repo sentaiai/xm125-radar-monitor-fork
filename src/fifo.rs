@@ -121,6 +121,16 @@ impl FifoWriter {
         }
     }
 
+    /// Write pre-formatted JSON/text line with timing control (spi-lib pattern)
+    pub fn write_timed_line(&mut self, line: &str) -> Result<bool, std::io::Error> {
+        if self.should_write() {
+            self.write_data(&format!("{line}\n"))?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Write data with timing control (spi-lib pattern)
     pub fn write_timed_json(
         &mut self,

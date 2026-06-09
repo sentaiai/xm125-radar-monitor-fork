@@ -5,15 +5,17 @@
 
 use super::registers::{
     CMD_PRESENCE_APPLY_CONFIGURATION, CMD_PRESENCE_RESET_MODULE, CMD_PRESENCE_START_DETECTOR,
-    CMD_PRESENCE_STOP_DETECTOR, CMD_RESET_MODULE, PRESENCE_REG_AUTO_PROFILE_ADDRESS,
-    PRESENCE_REG_AUTO_STEP_LENGTH_ADDRESS, PRESENCE_REG_AUTO_SUBSWEEPS_ADDRESS,
-    PRESENCE_REG_COMMAND_ADDRESS, PRESENCE_REG_DETECTOR_STATUS_ADDRESS, PRESENCE_REG_END_ADDRESS,
-    PRESENCE_REG_FRAME_RATE_ADDRESS, PRESENCE_REG_HWAAS_ADDRESS,
-    PRESENCE_REG_INTER_DETECTION_THRESHOLD_ADDRESS, PRESENCE_REG_INTRA_DETECTION_THRESHOLD_ADDRESS,
-    PRESENCE_REG_MANUAL_PROFILE_ADDRESS, PRESENCE_REG_MANUAL_STEP_LENGTH_ADDRESS,
-    PRESENCE_REG_SIGNAL_QUALITY_ADDRESS, PRESENCE_REG_START_ADDRESS, REG_INTER_PRESENCE_SCORE,
-    REG_INTRA_PRESENCE_SCORE, REG_PRESENCE_DISTANCE, REG_PRESENCE_RESULT, STATUS_BUSY_MASK,
-    STATUS_ERROR_MASK,
+    CMD_PRESENCE_STOP_DETECTOR, CMD_RESET_MODULE, PRESENCE_REG_ACTUAL_FRAME_RATE_ADDRESS,
+    PRESENCE_REG_AUTO_PROFILE_ADDRESS, PRESENCE_REG_AUTO_STEP_LENGTH_ADDRESS,
+    PRESENCE_REG_AUTO_SUBSWEEPS_ADDRESS, PRESENCE_REG_COMMAND_ADDRESS,
+    PRESENCE_REG_DETECTOR_STATUS_ADDRESS, PRESENCE_REG_END_ADDRESS, PRESENCE_REG_FRAME_RATE_ADDRESS,
+    PRESENCE_REG_HWAAS_ADDRESS, PRESENCE_REG_INTER_DETECTION_THRESHOLD_ADDRESS,
+    PRESENCE_REG_INTRA_DETECTION_THRESHOLD_ADDRESS, PRESENCE_REG_MANUAL_PROFILE_ADDRESS,
+    PRESENCE_REG_MANUAL_STEP_LENGTH_ADDRESS, PRESENCE_REG_SIGNAL_QUALITY_ADDRESS,
+    PRESENCE_REG_START_ADDRESS, PRESENCE_RESULT_DETECTED_MASK,
+    PRESENCE_RESULT_DETECTOR_ERROR_MASK, PRESENCE_RESULT_STICKY_MASK,
+    PRESENCE_RESULT_TEMPERATURE_MASK, REG_INTER_PRESENCE_SCORE, REG_INTRA_PRESENCE_SCORE,
+    REG_PRESENCE_DISTANCE, REG_PRESENCE_RESULT, STATUS_BUSY_MASK, STATUS_ERROR_MASK,
 };
 use crate::error::{RadarError, Result};
 use crate::i2c::I2cDevice;
@@ -30,9 +32,17 @@ pub enum PresenceRange {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresenceMeasurement {
     pub presence_detected: bool,
+    pub presence_sticky: bool,
     pub presence_distance: f32,
     pub intra_presence_score: f32, // Fast motion score
     pub inter_presence_score: f32, // Slow motion score
+    pub detector_error: bool,
+    pub internal_temperature_c: i16,
+    pub actual_frame_rate_hz: f32,
+    pub start_m: f32,
+    pub end_m: f32,
+    pub intra_threshold: f32,
+    pub inter_threshold: f32,
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
@@ -502,55 +512,44 @@ impl<'a> PresenceDetector<'a> {
         Ok(())
     }
 
+    fn read_u32_register(&mut self, address: u16) -> Result<u32> {
+        let data = self.i2c.read_register(address, 4)?;
+        Ok(u32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+    }
+
+    fn register_milli_to_f32(raw: u32) -> f32 {
+        raw as f32 / 1000.0
+    }
+
     /// Measure presence detection
     pub async fn measure(&mut self) -> Result<PresenceMeasurement> {
-        // Read presence detection results
-        let presence_result = self.i2c.read_register(REG_PRESENCE_RESULT, 4)?;
-        let presence_distance = self.i2c.read_register(REG_PRESENCE_DISTANCE, 4)?;
-        let intra_score = self.i2c.read_register(REG_INTRA_PRESENCE_SCORE, 4)?;
-        let inter_score = self.i2c.read_register(REG_INTER_PRESENCE_SCORE, 4)?;
+        let presence_value = self.read_u32_register(REG_PRESENCE_RESULT)?;
+        let distance_value = self.read_u32_register(REG_PRESENCE_DISTANCE)?;
+        let intra_value = self.read_u32_register(REG_INTRA_PRESENCE_SCORE)?;
+        let inter_value = self.read_u32_register(REG_INTER_PRESENCE_SCORE)?;
+        let actual_frame_rate_raw = self.read_u32_register(PRESENCE_REG_ACTUAL_FRAME_RATE_ADDRESS)?;
+        let start_raw = self.read_u32_register(PRESENCE_REG_START_ADDRESS)?;
+        let end_raw = self.read_u32_register(PRESENCE_REG_END_ADDRESS)?;
+        let intra_threshold_raw =
+            self.read_u32_register(PRESENCE_REG_INTRA_DETECTION_THRESHOLD_ADDRESS)?;
+        let inter_threshold_raw =
+            self.read_u32_register(PRESENCE_REG_INTER_DETECTION_THRESHOLD_ADDRESS)?;
 
-        // Parse results
-        let presence_value = u32::from_be_bytes([
-            presence_result[0],
-            presence_result[1],
-            presence_result[2],
-            presence_result[3],
-        ]);
-        let distance_value = u32::from_be_bytes([
-            presence_distance[0],
-            presence_distance[1],
-            presence_distance[2],
-            presence_distance[3],
-        ]);
-        let intra_value = u32::from_be_bytes([
-            intra_score[0],
-            intra_score[1],
-            intra_score[2],
-            intra_score[3],
-        ]);
-        let inter_value = u32::from_be_bytes([
-            inter_score[0],
-            inter_score[1],
-            inter_score[2],
-            inter_score[3],
-        ]);
-
-        // Extract presence detection (bit 0)
-        let presence_detected = (presence_value & 0x1) != 0;
-
-        // Convert distance from mm to meters
-        let presence_distance = (distance_value as f32) / 1000.0;
-
-        // Convert scores (scaled by 1000)
-        let intra_presence_score = (intra_value as f32) / 1000.0;
-        let inter_presence_score = (inter_value as f32) / 1000.0;
+        let temp_bits = (presence_value & PRESENCE_RESULT_TEMPERATURE_MASK) >> 16;
 
         Ok(PresenceMeasurement {
-            presence_detected,
-            presence_distance,
-            intra_presence_score,
-            inter_presence_score,
+            presence_detected: presence_value & PRESENCE_RESULT_DETECTED_MASK != 0,
+            presence_sticky: presence_value & PRESENCE_RESULT_STICKY_MASK != 0,
+            presence_distance: Self::register_milli_to_f32(distance_value),
+            intra_presence_score: Self::register_milli_to_f32(intra_value),
+            inter_presence_score: Self::register_milli_to_f32(inter_value),
+            detector_error: presence_value & PRESENCE_RESULT_DETECTOR_ERROR_MASK != 0,
+            internal_temperature_c: temp_bits as i16,
+            actual_frame_rate_hz: Self::register_milli_to_f32(actual_frame_rate_raw),
+            start_m: Self::register_milli_to_f32(start_raw),
+            end_m: Self::register_milli_to_f32(end_raw),
+            intra_threshold: Self::register_milli_to_f32(intra_threshold_raw),
+            inter_threshold: Self::register_milli_to_f32(inter_threshold_raw),
             timestamp: chrono::Utc::now(),
         })
     }

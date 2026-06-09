@@ -7,7 +7,7 @@
 
 Production-ready CLI tool for Acconeer XM125 radar modules with verified 7m detection range and comprehensive configuration control.
 
-**Version**: 2.0.9  
+**Version**: 2.0.16  
 **Maintainer**: Alex J Lennon (ajlennon@dynamicdevices.co.uk)  
 **Copyright**: © 2025 Dynamic Devices Ltd. All rights reserved.
 
@@ -32,7 +32,8 @@ Production-ready CLI tool for Acconeer XM125 radar modules with verified 7m dete
 - **Automatic Firmware Management**: Auto-detects and updates firmware via `stm32flash`
 - **Comprehensive Configuration**: Direct parameter control with custom ranges up to 7m
 - **Enhanced Monitoring**: Continuous operation with detailed CSV export and confidence analysis
-- **FIFO Integration**: Compatible with spi-lib readers, drop-in replacement for BGT60TR13C systems
+- **FIFO Integration**: Extended JSON on `/tmp/presence` for systemd and container readers; simple format remains BGT60-compatible
+- **I2C Register Snapshot**: `registers` command dumps all presence-firmware registers with `R_` / `RW_` access prefixes
 - **Internal GPIO Control**: Hardware reset and bootloader control without external scripts
 - **Register-Level Debugging**: Complete register dumps with descriptions for optimization
 - **Cross-compilation**: Native ARM64 builds for embedded targets
@@ -57,6 +58,10 @@ sudo xm125-radar-monitor presence --min-range 0.5 --max-range 7.0 --continuous -
 
 # Register debugging (verify configuration)
 sudo xm125-radar-monitor --debug-registers presence --min-range 0.5 --max-range 7.0 --profile manual
+
+# Full I2C register snapshot (presence firmware only)
+sudo systemctl stop xm125-radar-monitor.service   # avoid I2C contention
+sudo xm125-radar-monitor -q registers
 ```
 
 ## Hardware Requirements
@@ -78,6 +83,7 @@ sudo xm125-radar-monitor info            # Detailed device information
 # Measurement commands
 sudo xm125-radar-monitor distance        # Distance measurement mode
 sudo xm125-radar-monitor presence        # Presence detection mode
+sudo xm125-radar-monitor registers       # One-shot I2C register snapshot (presence FW)
 
 # Hardware and firmware management
 sudo xm125-radar-monitor firmware        # Firmware operations (check, update, verify, erase)
@@ -249,12 +255,24 @@ XM125 Register Dump - Presence Mode
 
 ## FIFO Integration (System Integration)
 
-The XM125 radar monitor provides **drop-in compatibility** with existing spi-lib (BGT60TR13C) systems through FIFO output.
+The XM125 radar monitor writes presence data to **`/tmp/presence`** (named pipe). The default **systemd service** uses extended JSON every 5 seconds:
+
+```bash
+# Service ExecStart (reference)
+xm125-radar-monitor --fifo-output --fifo-format json --fifo-interval 5.0 --quiet \
+  presence --min-range 0.5 --max-range 7.0 --continuous
+```
+
+Stop the service before manual CLI use on the same I2C bus:
+
+```bash
+sudo systemctl stop xm125-radar-monitor.service
+```
 
 ### FIFO Configuration
 
 ```bash
-# Basic FIFO output (spi-lib compatible, 5-second intervals)
+# Basic FIFO output (spi-lib compatible simple format, 5-second intervals)
 sudo xm125-radar-monitor presence --continuous --fifo-output
 
 # Custom FIFO path
@@ -263,13 +281,14 @@ sudo xm125-radar-monitor presence --continuous --fifo-output --fifo-path /tmp/cu
 # Real-time mode (every measurement)
 sudo xm125-radar-monitor presence --continuous --fifo-output --fifo-interval 0
 
-# Enhanced JSON format with timing control
-sudo xm125-radar-monitor presence --continuous --fifo-output --fifo-format json --fifo-interval 2.0
+# Extended JSON format (used by xm125-radar-monitor.service)
+sudo xm125-radar-monitor presence --continuous --fifo-output --fifo-format json --fifo-interval 5.0
 ```
 
 ### FIFO Output Formats
 
 #### Simple Format (BGT60TR13C Compatible)
+
 ```
 1 2.45
 0 0.00
@@ -277,33 +296,143 @@ STATUS Starting up
 STATUS App exit
 ```
 
-#### JSON Format (Enhanced XM125 Data)
+#### JSON Format (`--fifo-format json`) — `/tmp/presence` only
+
+This is the **extended** format written to the FIFO. CLI `--format json` on `presence` still uses the shorter console JSON (see [Output Formats](#output-formats)).
+
+All floating-point values are formatted to **3 decimal places**.
+
 ```json
 {
-  "timestamp": "2025-01-25 14:30:25.123",
-  "sensor_type": "XM125",
+  "confidence": "HIGH",
   "detection_mode": "presence",
+  "intra_score": 7.781,
+  "inter_score": 10.379,
   "presence_detected": true,
-  "presence_distance_m": 2.45,
-  "intra_score": 1.8,
-  "inter_score": 2.1,
+  "presence_distance_m": 0.640,
+  "sensor_type": "XM125",
   "signal_quality": "STRONG",
-  "confidence": "HIGH"
+  "timestamp": "2026-06-09 11:09:54.106",
+  "presence_sticky": true,
+  "R_start_m": 0.500,
+  "R_end_m": 7.000,
+  "distance_zone": "near",
+  "intra_threshold": 1.300,
+  "inter_threshold": 1.000,
+  "actual_frame_rate_hz": 5.263,
+  "detector_error": false,
+  "internal_temperature_c": 47,
+  "movement_type": "slow"
 }
 ```
+
+| Field | Description |
+|-------|-------------|
+| `confidence` | `NONE` / `LOW` / `MEDIUM` / `HIGH` (derived from scores when presence detected) |
+| `intra_score` | Fast motion score |
+| `inter_score` | Slow motion score |
+| `presence_distance_m` | Estimated target distance (m) |
+| `presence_sticky` | Latched presence since last read (I2C register bit) |
+| `R_start_m` / `R_end_m` | Configured detection range from hardware registers |
+| `distance_zone` | `near` (0.5 m to under 1.0 m), `mid` (1.0 m to under 3.0 m), `far` (3.0 m to 7.0 m), or `out_of_range` |
+| `intra_threshold` / `inter_threshold` | Active detection thresholds from config registers |
+| `actual_frame_rate_hz` | Achieved frame rate (may be lower than configured rate) |
+| `internal_temperature_c` | A121 chip internal temperature (not room temp) |
+| `movement_type` | See table below |
+
+**`movement_type` logic**
+
+| Condition | Value |
+|-----------|-------|
+| `presence_detected == false` | `none` |
+| `intra_score > inter_score` | `fast` |
+| otherwise | `slow` |
 
 ### Reading FIFO Data
 
 ```bash
-# Read FIFO output
 cat /tmp/presence
-
-# Continuous monitoring
 tail -f /tmp/presence
-
-# Use with existing BGT60TR13C applications
 your_existing_reader < /tmp/presence
 ```
+
+## I2C Register Snapshot (`registers`)
+
+Reads **all** I2C registers exposed by `i2c_presence_detector.bin` in one shot. Requires **presence firmware** (application ID `2`). Best used while the detector is running, or after configuring with `presence`.
+
+```bash
+# Stop service first to avoid I2C contention
+sudo systemctl stop xm125-radar-monitor.service
+
+# JSON snapshot (default human mode also prints JSON)
+sudo xm125-radar-monitor -q registers
+sudo xm125-radar-monitor --format json registers
+
+# Global flags must come before the subcommand
+xm125-radar-monitor -q --format json registers   # correct
+xm125-radar-monitor registers --format json    # wrong (--format ignored)
+```
+
+### Register JSON field prefixes
+
+| Prefix | Meaning |
+|--------|---------|
+| `R_` | Read-only register (or derived read-only field) |
+| `RW_` | Read/write configuration register (change via I2C, then stop → apply → start) |
+| *(none)* | Host metadata (`timestamp`) or grouping keys (`version`, `results`, `configuration`) |
+
+### Example `registers` output
+
+```json
+{
+  "timestamp": "2026-06-05T08:25:36.705998644Z",
+  "R_application_id": 2,
+  "R_application_name": "presence_detector",
+  "version": {
+    "R_major": 1,
+    "R_minor": 11,
+    "R_patch": 1,
+    "R_raw": 68353
+  },
+  "R_protocol_status": 0,
+  "R_measure_counter": 3356,
+  "detector_status": {
+    "R_raw": 255,
+    "R_busy": false,
+    "R_rss_register_ok": true,
+    "R_config_apply_ok": true,
+    "R_detector_error": false
+  },
+  "results": {
+    "R_presence_detected": true,
+    "R_presence_sticky": true,
+    "R_detector_error": false,
+    "R_internal_temperature_c": 51,
+    "R_presence_distance_m": 0.64,
+    "R_intra_presence_score": 2.553,
+    "R_inter_presence_score": 5.24,
+    "R_actual_frame_rate_hz": 5.263
+  },
+  "configuration": {
+    "RW_sweeps_per_frame": 16,
+    "RW_frame_rate_hz": 12.0,
+    "RW_intra_detection_threshold": 1.3,
+    "RW_inter_detection_threshold": 1.0,
+    "RW_start_mm": 500,
+    "RW_end_mm": 7000,
+    "R_start_m": 0.5,
+    "R_end_m": 7.0,
+    "RW_manual_profile": 5,
+    "RW_hwaas": 32,
+    "RW_signal_quality": 20000,
+    "RW_detection_on_gpio": false
+  }
+}
+```
+
+The snapshot includes every readable presence register (status, live results, and full configuration). Register map: Acconeer `presence_reg_protocol.h`. Command register `256` is write-only and is not included.
+
+**Difference from FIFO JSON:** `registers` is a one-time diagnostic dump with `R_`/`RW_` keys and nested sections. FIFO JSON is a flat stream optimized for consumers on `/tmp/presence` (`distance_zone`, `movement_type`, etc.).
 
 ## Configuration Options
 
@@ -326,12 +455,28 @@ sudo xm125-radar-monitor --no-auto-reconnect status
 # Human-readable (default)
 sudo xm125-radar-monitor presence
 
-# JSON output for APIs
+# JSON output for APIs (short format — not the same as FIFO JSON)
 sudo xm125-radar-monitor --format json presence
 
 # CSV output for data analysis
 sudo xm125-radar-monitor --format csv presence
 ```
+
+**CLI presence JSON** (console / `--format json`):
+
+```json
+{
+  "timestamp": "2026-06-09 11:09:54.106",
+  "presence_detected": true,
+  "presence_distance_m": 0.64,
+  "intra_score": 7.781,
+  "inter_score": 10.379,
+  "signal_quality": "STRONG",
+  "confidence": "HIGH"
+}
+```
+
+For the **extended** JSON with `movement_type`, `distance_zone`, register-backed fields, etc., use `--fifo-output --fifo-format json` (see [FIFO Integration](#fifo-integration-system-integration)).
 
 ## Build & Deploy
 
@@ -352,7 +497,9 @@ scp target/aarch64-unknown-linux-gnu/release/xm125-radar-monitor user@target:/us
 | Unknown command errors | Reset device: `sudo xm125-radar-monitor gpio reset-run` |
 | Calibration timeout | Check hardware connections and power |
 | Firmware update fails | Ensure device in bootloader mode: `sudo xm125-radar-monitor bootloader` |
-| Register values incorrect | Use `--debug-registers` to verify configuration is applied |
+| Register values incorrect | Use `--debug-registers` or `registers` to verify configuration |
+| `registers` fails / wrong app ID | Flash presence firmware: `firmware update presence` |
+| Empty or stale `/tmp/presence` | Ensure service running; reader must open FIFO (`tail -f /tmp/presence`) |
 
 Use `--verbose` for detailed I2C transaction logs and debugging information.
 

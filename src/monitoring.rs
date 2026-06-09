@@ -5,8 +5,8 @@
 
 use crate::cli::Cli;
 use crate::display::{
-    display_distance_result, display_presence_result, write_distance_to_fifo,
-    write_presence_to_fifo,
+    display_distance_result, display_presence_result, presence_signal_metrics,
+    write_distance_to_fifo, write_presence_to_fifo,
 };
 use crate::error::RadarError;
 use crate::fifo::FifoWriter;
@@ -180,34 +180,6 @@ fn setup_presence_csv_writer(filename: &str) -> Result<csv::Writer<File>, RadarE
     Ok(writer)
 }
 
-/// Calculate signal quality and confidence metrics from presence measurement
-fn calculate_signal_metrics(result: &PresenceMeasurement) -> (&'static str, &'static str) {
-    let max_score = result.intra_presence_score.max(result.inter_presence_score);
-
-    let signal_quality = if max_score > 2.0 {
-        "STRONG"
-    } else if max_score > 1.0 {
-        "MEDIUM"
-    } else if max_score > 0.5 {
-        "WEAK"
-    } else {
-        "NONE"
-    };
-
-    let confidence = if result.presence_detected {
-        if max_score > 3.0 {
-            "HIGH"
-        } else if max_score > 1.5 {
-            "MEDIUM"
-        } else {
-            "LOW"
-        }
-    } else {
-        "NONE"
-    };
-
-    (signal_quality, confidence)
-}
 
 /// Process a single presence measurement (display, CSV, FIFO output)
 fn process_presence_measurement(
@@ -225,7 +197,7 @@ fn process_presence_measurement(
 
     // CSV output
     if let Some(ref mut writer) = csv_writer {
-        let (signal_quality, confidence) = calculate_signal_metrics(result);
+        let (signal_quality, confidence) = presence_signal_metrics(result);
 
         writer
             .write_record([
